@@ -1,0 +1,987 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bathroom Queue Management System</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.22.5/babel.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
+    <style>
+        .animate-pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .5; }
+        }
+        .notification {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            z-index: 50;
+            max-width: 20rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const BathroomSystem = () => {
+            // Check URL parameters for student-only mode
+            const urlParams = new URLSearchParams(window.location.search);
+            const isStudentOnly = urlParams.get('student') === 'true';
+            
+            // Core state
+            const [mode, setMode] = useState('student');
+            const [userRole, setUserRole] = useState(isStudentOnly ? 'student-only' : 'student');
+            const [teacherPassword, setTeacherPassword] = useState('');
+            const [students, setStudents] = useState({});
+            const [queues, setQueues] = useState({ boys: [], girls: [] });
+            const [currentOut, setCurrentOut] = useState({ boy: null, girl: null });
+            const [timers, setTimers] = useState({ boy: null, girl: null });
+            
+            // UI state
+            const [selectedClass, setSelectedClass] = useState('Purple');
+            const [selectedStudent, setSelectedStudent] = useState('');
+            const [newStudentName, setNewStudentName] = useState('');
+            const [newStudentGender, setNewStudentGender] = useState('boy');
+            const [notifications, setNotifications] = useState([]);
+            const [showOverride, setShowOverride] = useState(false);
+            const [overrideStudent, setOverrideStudent] = useState(null);
+            const [password, setPassword] = useState('');
+            
+            // Settings
+            const [alertThreshold, setAlertThreshold] = useState(5);
+            const [warningThreshold, setWarningThreshold] = useState(3);
+            const [maxDailyUses, setMaxDailyUses] = useState(3);
+            const [soundEnabled, setSoundEnabled] = useState(true);
+            const [darkMode, setDarkMode] = useState(false);
+            
+            const classes = ['Purple', 'Blue', 'Yellow', 'Green', 'Red', 'Orange'];
+
+            // Load saved data
+            useEffect(() => {
+                try {
+                    const savedStudents = localStorage.getItem('bathroomSystem_students');
+                    const savedSettings = localStorage.getItem('bathroomSystem_settings');
+                    
+                    if (savedStudents) {
+                        setStudents(JSON.parse(savedStudents));
+                    }
+                    if (savedSettings) {
+                        const settings = JSON.parse(savedSettings);
+                        setAlertThreshold(settings.alertThreshold || 5);
+                        setWarningThreshold(settings.warningThreshold || 3);
+                        setMaxDailyUses(settings.maxDailyUses || 3);
+                        setSoundEnabled(settings.soundEnabled !== false);
+                        setDarkMode(settings.darkMode || false);
+                    }
+                } catch (error) {
+                    console.error('Error loading data:', error);
+                }
+            }, []);
+
+            // Save data when changed
+            useEffect(() => {
+                try {
+                    localStorage.setItem('bathroomSystem_students', JSON.stringify(students));
+                    localStorage.setItem('bathroomSystem_settings', JSON.stringify({
+                        alertThreshold, warningThreshold, maxDailyUses, soundEnabled, darkMode
+                    }));
+                } catch (error) {
+                    console.error('Error saving data:', error);
+                }
+            }, [students, alertThreshold, warningThreshold, maxDailyUses, soundEnabled, darkMode]);
+
+            // Timer system
+            useEffect(() => {
+                const interval = setInterval(() => {
+                    setTimers(prev => {
+                        const newTimers = { ...prev };
+                        
+                        ['boy', 'girl'].forEach(gender => {
+                            if (newTimers[gender] && newTimers[gender].startTime) {
+                                newTimers[gender].elapsed = Date.now() - newTimers[gender].startTime;
+                                const minutes = newTimers[gender].elapsed / (1000 * 60);
+                                
+                                if (minutes >= alertThreshold && !newTimers[gender].alertTriggered) {
+                                    newTimers[gender].alertTriggered = true;
+                                    addNotification(`${currentOut[gender]?.student.name} has been out for ${alertThreshold}+ minutes!`, 'error');
+                                    if (soundEnabled) playAlertSound();
+                                } else if (minutes >= warningThreshold && !newTimers[gender].warningTriggered) {
+                                    newTimers[gender].warningTriggered = true;
+                                    addNotification(`${currentOut[gender]?.student.name} has been out for ${warningThreshold} minutes`, 'warning');
+                                }
+                            }
+                        });
+                        
+                        return newTimers;
+                    });
+                }, 1000);
+
+                return () => clearInterval(interval);
+            }, [alertThreshold, warningThreshold, soundEnabled, currentOut]);
+
+            // Helper functions
+            const addNotification = (message, type = 'info') => {
+                const notification = { id: Date.now(), message, type, timestamp: new Date() };
+                setNotifications(prev => [notification, ...prev.slice(0, 4)]);
+                
+                if (type !== 'error') {
+                    setTimeout(() => {
+                        setNotifications(prev => prev.filter(n => n.id !== notification.id));
+                    }, 5000);
+                }
+            };
+
+            const removeNotification = (id) => {
+                setNotifications(prev => prev.filter(n => n.id !== id));
+            };
+
+            const playAlertSound = () => {
+                try {
+                    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    const oscillator = audioContext.createOscillator();
+                    const gainNode = audioContext.createGain();
+                    
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioContext.destination);
+                    
+                    oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
+                    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+                    
+                    oscillator.start(audioContext.currentTime);
+                    oscillator.stop(audioContext.currentTime + 0.5);
+                } catch (error) {
+                    console.warn('Audio not available');
+                }
+            };
+
+            const formatTime = (ms) => {
+                const seconds = Math.floor(ms / 1000);
+                const minutes = Math.floor(seconds / 60);
+                const remainingSeconds = seconds % 60;
+                return minutes + ':' + remainingSeconds.toString().padStart(2, '0');
+            };
+
+            const isOverTime = (ms) => ms > alertThreshold * 60 * 1000;
+            const isWarningTime = (ms) => ms > warningThreshold * 60 * 1000;
+
+            // Authentication
+            const handleTeacherLogin = () => {
+                if (isStudentOnly) return;
+                
+                if (teacherPassword === '27') {
+                    setUserRole('teacher');
+                    setTeacherPassword('');
+                    addNotification('Teacher login successful', 'success');
+                } else {
+                    addNotification('Incorrect teacher password', 'error');
+                    setTeacherPassword('');
+                }
+            };
+
+            const handleLogout = () => {
+                if (isStudentOnly) return;
+                setUserRole('student');
+                setMode('student');
+                addNotification('Logged out successfully', 'info');
+            };
+
+            // Student management
+            const addStudent = () => {
+                if (!newStudentName.trim()) return;
+                
+                const studentKey = selectedClass + '-' + newStudentName;
+                
+                if (students[studentKey]) {
+                    addNotification('Student already exists in this class', 'warning');
+                    return;
+                }
+                
+                setStudents(prev => ({
+                    ...prev,
+                    [studentKey]: {
+                        name: newStudentName,
+                        gender: newStudentGender,
+                        class: selectedClass,
+                        dailyUsed: 0,
+                        lastUsed: null,
+                        createdDate: new Date().toISOString()
+                    }
+                }));
+
+                setNewStudentName('');
+                addNotification(`Added ${newStudentName} to ${selectedClass} class`, 'success');
+            };
+
+            const removeStudent = (studentKey) => {
+                const student = students[studentKey];
+                setStudents(prev => {
+                    const newStudents = { ...prev };
+                    delete newStudents[studentKey];
+                    return newStudents;
+                });
+                
+                setQueues(prev => ({
+                    boys: prev.boys.filter(item => item.key !== studentKey),
+                    girls: prev.girls.filter(item => item.key !== studentKey)
+                }));
+                
+                addNotification(`Removed ${student?.name} from system`, 'info');
+            };
+
+            const getClassStudents = (className) => {
+                return Object.entries(students).filter(([key, student]) => 
+                    student.class === className && !student.isVisitor
+                );
+            };
+
+            // Queue management
+            const addToQueue = () => {
+                if (!selectedStudent) return;
+
+                const student = students[selectedStudent];
+                if (!student) return;
+
+                if (student.dailyUsed >= maxDailyUses) {
+                    const today = new Date().toDateString();
+                    if (student.lastUsed === today) {
+                        setOverrideStudent({ key: selectedStudent, student: student, reason: 'daily_limit' });
+                        setShowOverride(true);
+                        return;
+                    }
+                }
+
+                const genderQueue = student.gender === 'boy' ? 'boys' : 'girls';
+                
+                if (queues[genderQueue].find(s => s.key === selectedStudent)) {
+                    addNotification('Student already in queue', 'warning');
+                    return;
+                }
+
+                setQueues(prev => ({
+                    ...prev,
+                    [genderQueue]: [...prev[genderQueue], { key: selectedStudent, student }]
+                }));
+
+                setSelectedStudent('');
+                addNotification(`${student.name} added to queue`, 'success');
+            };
+
+            const sendToBathroom = (gender) => {
+                const genderQueue = gender === 'boy' ? 'boys' : 'girls';
+                if (queues[genderQueue].length === 0 || currentOut[gender]) return;
+
+                const nextStudent = queues[genderQueue][0];
+                
+                setCurrentOut(prev => ({ ...prev, [gender]: nextStudent }));
+                setTimers(prev => ({ 
+                    ...prev, 
+                    [gender]: { 
+                        startTime: Date.now(), 
+                        elapsed: 0,
+                        alertTriggered: false,
+                        warningTriggered: false
+                    }
+                }));
+                
+                setQueues(prev => ({
+                    ...prev,
+                    [genderQueue]: prev[genderQueue].slice(1)
+                }));
+                
+                addNotification(`${nextStudent.student.name} sent to bathroom`, 'info');
+            };
+
+            const returnFromBathroom = (gender) => {
+                if (!currentOut[gender]) return;
+
+                const student = currentOut[gender];
+                const sessionTime = timers[gender] ? timers[gender].elapsed || 0 : 0;
+
+                setStudents(prev => ({
+                    ...prev,
+                    [student.key]: {
+                        ...prev[student.key],
+                        dailyUsed: (prev[student.key].dailyUsed || 0) + 1,
+                        lastUsed: new Date().toDateString()
+                    }
+                }));
+
+                setCurrentOut(prev => ({ ...prev, [gender]: null }));
+                setTimers(prev => ({ ...prev, [gender]: null }));
+
+                addNotification(`${student.student.name} returned (${formatTime(sessionTime)})`, 'success');
+
+                setTimeout(() => {
+                    const genderQueue = gender === 'boy' ? 'boys' : 'girls';
+                    if (queues[genderQueue].length > 0) {
+                        sendToBathroom(gender);
+                    }
+                }, 100);
+            };
+
+            const handleOverride = (accept) => {
+                if (password !== '27') {
+                    addNotification('Incorrect override password', 'error');
+                    setPassword('');
+                    return;
+                }
+
+                if (accept && overrideStudent) {
+                    const student = overrideStudent.student;
+                    const genderQueue = student.gender === 'boy' ? 'boys' : 'girls';
+                    
+                    setQueues(prev => ({
+                        ...prev,
+                        [genderQueue]: [...prev[genderQueue], { key: overrideStudent.key, student }]
+                    }));
+                    
+                    addNotification(`Override approved for ${student.name}`, 'warning');
+                } else {
+                    addNotification('Override denied', 'info');
+                }
+
+                setShowOverride(false);
+                setOverrideStudent(null);
+                setPassword('');
+            };
+
+            const clearAllData = () => {
+                if (window.confirm('Are you sure you want to clear all data? This cannot be undone.')) {
+                    setStudents({});
+                    setQueues({ boys: [], girls: [] });
+                    setCurrentOut({ boy: null, girl: null });
+                    setTimers({ boy: null, girl: null });
+                    localStorage.removeItem('bathroomSystem_students');
+                    localStorage.removeItem('bathroomSystem_settings');
+                    addNotification('All data cleared', 'warning');
+                }
+            };
+
+            // Render functions
+            const renderNotifications = () => (
+                <div className="notification space-y-2">
+                    {notifications.map(notification => (
+                        <div 
+                            key={notification.id}
+                            className={`p-3 rounded-lg shadow-lg flex items-center justify-between ${
+                                notification.type === 'error' ? 'bg-red-500 text-white' :
+                                notification.type === 'warning' ? 'bg-yellow-500 text-black' :
+                                notification.type === 'success' ? 'bg-green-500 text-white' :
+                                'bg-blue-500 text-white'
+                            }`}
+                        >
+                            <span className="text-sm">{notification.message}</span>
+                            <button 
+                                onClick={() => removeNotification(notification.id)}
+                                className="ml-2 text-lg font-bold hover:opacity-70"
+                            >
+                                ×
+                            </button>
+                        </div>
+                    ))}
+                </div>
+            );
+
+            const renderStudentMode = () => (
+                <div className={`p-6 ${darkMode ? 'bg-blue-900' : 'bg-blue-50'} min-h-screen`}>
+                    <h1 className="text-3xl font-bold mb-6 text-center text-blue-800">
+                        📚 Bathroom Queue
+                    </h1>
+                    
+                    <div className="max-w-md mx-auto bg-white rounded-lg shadow-lg p-6">
+                        <div className="mb-4">
+                            <label className="block text-sm font-medium mb-2 text-gray-700">Select Your Class:</label>
+                            <select 
+                                value={selectedClass} 
+                                onChange={(e) => setSelectedClass(e.target.value)}
+                                className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
+                            >
+                                {classes.map(cls => (
+                                    <option key={cls} value={cls}>{cls}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <div className="mb-4">
+                            <label className="block text-sm font-medium mb-2 text-gray-700">Select Your Name:</label>
+                            <select 
+                                value={selectedStudent} 
+                                onChange={(e) => setSelectedStudent(e.target.value)}
+                                className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
+                            >
+                                <option value="">Choose your name...</option>
+                                {getClassStudents(selectedClass).map(([key, student]) => (
+                                    <option key={key} value={key}>
+                                        {student.name} {student.dailyUsed >= maxDailyUses ? '⚠️' : ''}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <button 
+                            onClick={addToQueue}
+                            disabled={!selectedStudent}
+                            className="w-full bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700 disabled:bg-gray-300 transition-colors"
+                        >
+                            Join Bathroom Queue
+                        </button>
+                        
+                        <div className="mt-4 p-3 bg-blue-50 rounded text-center">
+                            <div className="text-sm text-blue-600">
+                                Current Queue: {queues.boys.length} boys, {queues.girls.length} girls
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const renderDisplayMode = () => (
+                <div className={`p-6 ${darkMode ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'} min-h-screen`}>
+                    <h1 className="text-3xl font-bold mb-6 text-center">
+                        👁️ Bathroom Status
+                    </h1>
+                    
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full">
+                        {/* Boys Section */}
+                        <div className="bg-green-300 rounded-lg p-6">
+                            <h2 className="text-2xl font-bold mb-4 text-green-900 text-center">BOYS</h2>
+                            
+                            {currentOut.boy ? (
+                                <div className="bg-white rounded-lg p-4 mb-4">
+                                    <h3 className="font-semibold text-lg mb-2">Currently Out:</h3>
+                                    <div className={`p-3 rounded ${
+                                        isOverTime(timers.boy ? timers.boy.elapsed || 0 : 0) ? 'bg-red-100 animate-pulse' :
+                                        isWarningTime(timers.boy ? timers.boy.elapsed || 0 : 0) ? 'bg-yellow-100' : 'bg-green-100'
+                                    }`}>
+                                        <div className="text-center mb-2">
+                                            <span className="font-bold text-3xl">{currentOut.boy.student.name}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center">
+                                            <div className="text-xs text-gray-600">{currentOut.boy.student.class} Class</div>
+                                            <span className={`text-lg font-bold ${
+                                                isOverTime(timers.boy ? timers.boy.elapsed || 0 : 0) ? 'text-red-600' :
+                                                isWarningTime(timers.boy ? timers.boy.elapsed || 0 : 0) ? 'text-yellow-600' : 'text-green-600'
+                                            }`}>
+                                                {formatTime(timers.boy ? timers.boy.elapsed || 0 : 0)}
+                                            </span>
+                                        </div>
+                                        {isOverTime(timers.boy ? timers.boy.elapsed || 0 : 0) && (
+                                            <div className="text-xs text-red-600 font-bold mt-1">⚠️ OVERTIME ALERT!</div>
+                                        )}
+                                    </div>
+                                    <button 
+                                        onClick={() => returnFromBathroom('boy')}
+                                        className="w-full mt-2 bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 transition-colors"
+                                    >
+                                        Return
+                                    </button>
+                                </div>
+                            ) : (
+                                <div className="bg-white rounded-lg p-4 mb-4">
+                                    <div className="text-center text-gray-500 py-4">
+                                        No one currently out
+                                    </div>
+                                    {queues.boys.length > 0 && (
+                                        <button 
+                                            onClick={() => sendToBathroom('boy')}
+                                            className="w-full bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 transition-colors"
+                                        >
+                                            Send Next Boy
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+
+                            <div className="bg-white rounded-lg p-4">
+                                <h3 className="font-semibold text-lg mb-2">Queue ({queues.boys.length}):</h3>
+                                {queues.boys.length === 0 ? (
+                                    <div className="text-center text-gray-500 py-2">No one in queue</div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        {queues.boys.slice(0, 3).map((item, index) => (
+                                            <div key={item.key} className="p-2 bg-gray-50 rounded border">
+                                                <div className="flex justify-between items-center">
+                                                    <span className={`text-sm ${item.student.dailyUsed >= maxDailyUses ? 'animate-pulse text-red-600 font-bold' : ''}`}>
+                                                        {index + 1}. {item.student.name}
+                                                    </span>
+                                                </div>
+                                                <div className="text-xs text-gray-600 mt-1">
+                                                    {item.student.class} • Uses: {item.student.dailyUsed || 0}
+                                                </div>
+                                            </div>
+                                        ))}
+                                        {queues.boys.length > 3 && (
+                                            <div className="text-center text-xs text-gray-500">
+                                                +{queues.boys.length - 3} more students
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Girls Section */}
+                        <div className="bg-blue-300 rounded-lg p-6">
+                            <h2 className="text-2xl font-bold mb-4 text-blue-900 text-center">GIRLS</h2>
+                            
+                            {currentOut.girl ? (
+                                <div className="bg-white rounded-lg p-4 mb-4">
+                                    <h3 className="font-semibold text-lg mb-2">Currently Out:</h3>
+                                    <div className={`p-3 rounded ${
+                                        isOverTime(timers.girl ? timers.girl.elapsed || 0 : 0) ? 'bg-red-100 animate-pulse' :
+                                        isWarningTime(timers.girl ? timers.girl.elapsed || 0 : 0) ? 'bg-yellow-100' : 'bg-green-100'
+                                    }`}>
+                                        <div className="text-center mb-2">
+                                            <span className="font-bold text-3xl">{currentOut.girl.student.name}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center">
+                                            <div className="text-xs text-gray-600">{currentOut.girl.student.class} Class</div>
+                                            <span className={`text-lg font-bold ${
+                                                isOverTime(timers.girl ? timers.girl.elapsed || 0 : 0) ? 'text-red-600' :
+                                                isWarningTime(timers.girl ? timers.girl.elapsed || 0 : 0) ? 'text-yellow-600' : 'text-green-600'
+                                            }`}>
+                                                {formatTime(timers.girl ? timers.girl.elapsed || 0 : 0)}
+                                            </span>
+                                        </div>
+                                        {isOverTime(timers.girl ? timers.girl.elapsed || 0 : 0) && (
+                                            <div className="text-xs text-red-600 font-bold mt-1">⚠️ OVERTIME ALERT!</div>
+                                        )}
+                                    </div>
+                                    <button 
+                                        onClick={() => returnFromBathroom('girl')}
+                                        className="w-full mt-2 bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 transition-colors"
+                                    >
+                                        Return
+                                    </button>
+                                </div>
+                            ) : (
+                                <div className="bg-white rounded-lg p-4 mb-4">
+                                    <div className="text-center text-gray-500 py-4">
+                                        No one currently out
+                                    </div>
+                                    {queues.girls.length > 0 && (
+                                        <button 
+                                            onClick={() => sendToBathroom('girl')}
+                                            className="w-full bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700 transition-colors"
+                                        >
+                                            Send Next Girl
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+
+                            <div className="bg-white rounded-lg p-4">
+                                <h3 className="font-semibold text-lg mb-2">Queue ({queues.girls.length}):</h3>
+                                {queues.girls.length === 0 ? (
+                                    <div className="text-center text-gray-500 py-2">No one in queue</div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        {queues.girls.slice(0, 3).map((item, index) => (
+                                            <div key={item.key} className="p-2 bg-gray-50 rounded border">
+                                                <div className="flex justify-between items-center">
+                                                    <span className={`text-sm ${item.student.dailyUsed >= maxDailyUses ? 'animate-pulse text-red-600 font-bold' : ''}`}>
+                                                        {index + 1}. {item.student.name}
+                                                    </span>
+                                                </div>
+                                                <div className="text-xs text-gray-600 mt-1">
+                                                    {item.student.class} • Uses: {item.student.dailyUsed || 0}
+                                                </div>
+                                            </div>
+                                        ))}
+                                        {queues.girls.length > 3 && (
+                                            <div className="text-center text-xs text-gray-500">
+                                                +{queues.girls.length - 3} more students
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Override Modal */}
+                    {showOverride && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                            <div className="bg-white p-6 rounded-lg max-w-md w-full mx-4">
+                                <h3 className="text-lg font-bold mb-4 text-red-600">Daily Limit Exceeded</h3>
+                                <p className="mb-4">
+                                    {overrideStudent?.student?.name} has already used the bathroom {maxDailyUses} times today. 
+                                    Do you want to allow them to go anyway?
+                                </p>
+                                <div className="mb-4">
+                                    <input
+                                        type="password"
+                                        placeholder="Enter password (27)"
+                                        value={password}
+                                        onChange={(e) => setPassword(e.target.value)}
+                                        className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                                <div className="flex gap-2">
+                                    <button 
+                                        onClick={() => handleOverride(true)}
+                                        className="flex-1 bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 transition-colors"
+                                    >
+                                        Accept
+                                    </button>
+                                    <button 
+                                        onClick={() => handleOverride(false)}
+                                        className="flex-1 bg-red-600 text-white py-2 px-4 rounded hover:bg-red-700 transition-colors"
+                                    >
+                                        Deny
+                                    </button>
+                                    <button 
+                                        onClick={() => {setShowOverride(false); setPassword('');}}
+                                        className="px-4 py-2 border rounded hover:bg-gray-50 transition-colors"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+
+            const renderManageStudentsMode = () => (
+                <div className={`p-6 ${darkMode ? 'bg-purple-900' : 'bg-purple-50'} min-h-screen`}>
+                    <h1 className="text-3xl font-bold mb-6 text-center text-purple-800">
+                        👤 Manage Students
+                    </h1>
+                    
+                    <div className="max-w-4xl mx-auto">
+                        {/* Add Student Section */}
+                        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+                            <h2 className="text-xl font-bold mb-4 text-center">Add Student</h2>
+                            
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                                <div>
+                                    <label className="block text-sm font-medium mb-2 text-gray-700">Select Class:</label>
+                                    <select 
+                                        value={selectedClass} 
+                                        onChange={(e) => setSelectedClass(e.target.value)}
+                                        className="w-full p-2 border rounded focus:ring-2 focus:ring-purple-500"
+                                    >
+                                        {classes.map(cls => (
+                                            <option key={cls} value={cls}>{cls}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium mb-2 text-gray-700">Student Name:</label>
+                                    <input
+                                        type="text"
+                                        placeholder="Enter student name"
+                                        value={newStudentName}
+                                        onChange={(e) => setNewStudentName(e.target.value)}
+                                        className="w-full p-2 border rounded focus:ring-2 focus:ring-purple-500"
+                                        onKeyPress={(e) => e.key === 'Enter' && addStudent()}
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium mb-2 text-gray-700">Gender:</label>
+                                    <select 
+                                        value={newStudentGender} 
+                                        onChange={(e) => setNewStudentGender(e.target.value)}
+                                        className="w-full p-2 border rounded focus:ring-2 focus:ring-purple-500"
+                                    >
+                                        <option value="boy">Boy</option>
+                                        <option value="girl">Girl</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <button 
+                                onClick={addStudent}
+                                disabled={!newStudentName.trim()}
+                                className="w-full bg-purple-600 text-white py-2 px-4 rounded hover:bg-purple-700 disabled:bg-gray-300 transition-colors"
+                            >
+                                Add Student to Class
+                            </button>
+                        </div>
+
+                        {/* Students by Class */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            {classes.map(className => (
+                                <div key={className} className="bg-white rounded-lg shadow-lg p-4">
+                                    <h3 className="font-bold text-lg mb-3 text-center text-black">
+                                        {className} Class
+                                    </h3>
+                                    <div className="space-y-2">
+                                        {getClassStudents(className).length === 0 ? (
+                                            <div className="text-center text-gray-500 py-4 text-sm">
+                                                No students added yet
+                                            </div>
+                                        ) : (
+                                            getClassStudents(className).map(([key, student]) => (
+                                                <div key={key} className="flex items-center justify-between p-2 bg-gray-50 rounded hover:bg-gray-100 transition-colors">
+                                                    <div className="flex items-center">
+                                                        <span className="mr-2">
+                                                            {student.gender === 'boy' ? '👦' : '👧'}
+                                                        </span>
+                                                        <div className="text-sm">
+                                                            <div className="font-medium">{student.name}</div>
+                                                            {student.dailyUsed > 0 && (
+                                                                <div className="text-xs text-gray-600">
+                                                                    Today: {student.dailyUsed} uses
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        {student.dailyUsed >= maxDailyUses && (
+                                                            <span className="ml-2 text-xs bg-red-100 text-red-800 px-1 rounded">
+                                                                Limit reached
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <button 
+                                                        onClick={() => removeStudent(key)}
+                                                        className="text-red-500 hover:text-red-700 text-xs px-2 py-1 rounded border border-red-300 hover:bg-red-50 transition-colors"
+                                                    >
+                                                        Remove
+                                                    </button>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                    <div className="mt-3 pt-2 border-t text-center text-xs text-gray-500">
+                                        Total: {getClassStudents(className).length} students
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const renderTeacherMode = () => (
+                <div className={`p-6 ${darkMode ? 'bg-green-900' : 'bg-green-50'} min-h-screen`}>
+                    <h1 className="text-3xl font-bold mb-6 text-center text-green-800">
+                        ⚙️ Teacher Mode - Settings & Control
+                    </h1>
+                    
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                        {/* Current Status */}
+                        <div className="bg-white rounded-lg p-6 shadow-lg">
+                            <h2 className="text-xl font-bold mb-4">🕐 Current Status</h2>
+                            <div className="space-y-4">
+                                <div className="p-3 bg-blue-50 rounded">
+                                    <h3 className="font-semibold">Currently Out:</h3>
+                                    {currentOut.boy && (
+                                        <div className="text-sm flex justify-between items-center">
+                                            <span>Boy: {currentOut.boy.student.name}</span>
+                                            <span className={`font-bold ${
+                                                isOverTime(timers.boy ? timers.boy.elapsed || 0 : 0) ? 'text-red-600' :
+                                                isWarningTime(timers.boy ? timers.boy.elapsed || 0 : 0) ? 'text-yellow-600' : 'text-green-600'
+                                            }`}>
+                                                {formatTime(timers.boy ? timers.boy.elapsed || 0 : 0)}
+                                            </span>
+                                        </div>
+                                    )}
+                                    {currentOut.girl && (
+                                        <div className="text-sm flex justify-between items-center">
+                                            <span>Girl: {currentOut.girl.student.name}</span>
+                                            <span className={`font-bold ${
+                                                isOverTime(timers.girl ? timers.girl.elapsed || 0 : 0) ? 'text-red-600' :
+                                                isWarningTime(timers.girl ? timers.girl.elapsed || 0 : 0) ? 'text-yellow-600' : 'text-green-600'
+                                            }`}>
+                                                {formatTime(timers.girl ? timers.girl.elapsed || 0 : 0)}
+                                            </span>
+                                        </div>
+                                    )}
+                                    {!currentOut.boy && !currentOut.girl && (
+                                        <div className="text-sm text-gray-500">No one currently out</div>
+                                    )}
+                                </div>
+                                <div className="p-3 bg-gray-50 rounded">
+                                    <h3 className="font-semibold">Queue Status:</h3>
+                                    <div className="text-sm">Boys in queue: {queues.boys.length}</div>
+                                    <div className="text-sm">Girls in queue: {queues.girls.length}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Settings */}
+                        <div className="bg-white rounded-lg p-6 shadow-lg">
+                            <h2 className="text-xl font-bold mb-4">⚙️ Settings</h2>
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="block text-sm font-medium mb-1">Alert Threshold (minutes):</label>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        max="15"
+                                        value={alertThreshold}
+                                        onChange={(e) => setAlertThreshold(Number(e.target.value))}
+                                        className="w-full p-2 border rounded focus:ring-2 focus:ring-green-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium mb-1">Warning Threshold (minutes):</label>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        max="10"
+                                        value={warningThreshold}
+                                        onChange={(e) => setWarningThreshold(Number(e.target.value))}
+                                        className="w-full p-2 border rounded focus:ring-2 focus:ring-green-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium mb-1">Max Daily Uses:</label>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        max="10"
+                                        value={maxDailyUses}
+                                        onChange={(e) => setMaxDailyUses(Number(e.target.value))}
+                                        className="w-full p-2 border rounded focus:ring-2 focus:ring-green-500"
+                                    />
+                                </div>
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm font-medium">Sound Alerts:</span>
+                                    <button
+                                        onClick={() => setSoundEnabled(!soundEnabled)}
+                                        className={`px-3 py-1 rounded text-sm ${soundEnabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}
+                                    >
+                                        {soundEnabled ? '🔊 ON' : '🔇 OFF'}
+                                    </button>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm font-medium">Dark Mode:</span>
+                                    <button
+                                        onClick={() => setDarkMode(!darkMode)}
+                                        className={`px-3 py-1 rounded text-sm ${darkMode ? 'bg-gray-800 text-white' : 'bg-gray-200 text-gray-800'}`}
+                                    >
+                                        {darkMode ? 'ON' : 'OFF'}
+                                    </button>
+                                </div>
+                                <button
+                                    onClick={clearAllData}
+                                    className="w-full bg-red-600 text-white py-2 px-4 rounded hover:bg-red-700 transition-colors"
+                                >
+                                    Clear All Data
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Student Overview */}
+                    <div className="bg-white rounded-lg p-6 shadow-lg">
+                        <h2 className="text-xl font-bold mb-4">📊 Student Overview</h2>
+                        <div className="grid grid-cols-2 md:grid-cols-6 gap-4 text-center">
+                            {classes.map(className => {
+                                const classStudents = getClassStudents(className);
+                                return (
+                                    <div key={className} className="p-3 bg-gray-50 rounded">
+                                        <div className="font-bold text-lg">{classStudents.length}</div>
+                                        <div className="text-sm text-gray-600">{className}</div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </div>
+            );
+
+            // Main render
+            return (
+                <div className={`min-h-screen ${darkMode ? 'dark bg-gray-900' : 'bg-gray-50'}`}>
+                    {renderNotifications()}
+                    
+                    {/* Navigation Bar */}
+                    {!isStudentOnly && (
+                        <div className="bg-white shadow-sm border-b p-4">
+                            <div className="flex justify-center items-center space-x-4 flex-wrap">
+                                {userRole === 'student' ? (
+                                    <>
+                                        <div className="px-6 py-2 rounded-lg font-medium bg-blue-600 text-white">
+                                            👥 Student Mode
+                                        </div>
+                                        <div className="flex items-center space-x-2">
+                                            <input
+                                                type="password"
+                                                placeholder="Teacher password"
+                                                value={teacherPassword}
+                                                onChange={(e) => setTeacherPassword(e.target.value)}
+                                                className="px-3 py-2 border rounded text-sm focus:ring-2 focus:ring-green-500"
+                                                onKeyPress={(e) => e.key === 'Enter' && handleTeacherLogin()}
+                                            />
+                                            <button 
+                                                onClick={handleTeacherLogin}
+                                                className="px-4 py-2 bg-green-600 text-white rounded text-sm hover:bg-green-700 transition-colors"
+                                            >
+                                                Teacher Login
+                                            </button>
+                                        </div>
+                                    </>
+                                ) : (
+                                    <>
+                                        <button 
+                                            onClick={() => setMode('student')}
+                                            className={`px-6 py-2 rounded-lg font-medium transition-colors ${
+                                                mode === 'student' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                            }`}
+                                        >
+                                            👥 Student Mode
+                                        </button>
+                                        <button 
+                                            onClick={() => setMode('display')}
+                                            className={`px-6 py-2 rounded-lg font-medium transition-colors ${
+                                                mode === 'display' ? 'bg-gray-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                            }`}
+                                        >
+                                            👁️ Display Mode
+                                        </button>
+                                        <button 
+                                            onClick={() => setMode('manage')}
+                                            className={`px-6 py-2 rounded-lg font-medium transition-colors ${
+                                                mode === 'manage' ? 'bg-purple-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                            }`}
+                                        >
+                                            👤 Manage Students
+                                        </button>
+                                        <button 
+                                            onClick={() => setMode('teacher')}
+                                            className={`px-6 py-2 rounded-lg font-medium transition-colors ${
+                                                mode === 'teacher' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                            }`}
+                                        >
+                                            ⚙️ Teacher Mode
+                                        </button>
+                                        <button 
+                                            onClick={handleLogout}
+                                            className="px-4 py-2 bg-red-600 text-white rounded text-sm hover:bg-red-700 transition-colors"
+                                        >
+                                            Logout
+                                        </button>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Render Current Mode */}
+                    {(isStudentOnly || mode === 'student') && renderStudentMode()}
+                    {!isStudentOnly && userRole === 'teacher' && mode === 'display' && renderDisplayMode()}
+                    {!isStudentOnly && userRole === 'teacher' && mode === 'manage' && renderManageStudentsMode()}
+                    {!isStudentOnly && userRole === 'teacher' && mode === 'teacher' && renderTeacherMode()}
+                </div>
+            );
+        };
+
+        // Render the app
+        ReactDOM.render(<BathroomSystem />, document.getElementById('root'));
+    </script>
+</body>
+</html>
